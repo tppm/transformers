@@ -802,6 +802,7 @@ _import_structure = {
     ],
     "models.visual_bert": ["VisualBertConfig"],
     "models.vit": ["ViTConfig"],
+    "models.dinov2": ["Dinov2Config"],
     "models.vit_mae": ["ViTMAEConfig"],
     "models.vit_msn": ["ViTMSNConfig"],
     "models.vitdet": ["VitDetConfig"],
@@ -3564,6 +3565,13 @@ else:
             "ViTPreTrainedModel",
         ]
     )
+    _import_structure["models.dinov2"].extend(
+        [
+            "Dinov2ForImageClassification",
+            "Dinov2Model",
+            "Dinov2PreTrainedModel",
+        ]
+    )
     _import_structure["models.vit_mae"].extend(
         [
             "ViTMAEForPreTraining",
@@ -4399,6 +4407,13 @@ else:
             "TFViTPreTrainedModel",
         ]
     )
+    _import_structure["models.dinov2"].extend(
+        [
+            "TFDinov2ForImageClassification",
+            "TFDinov2Model",
+            "TFDinov2PreTrainedModel",
+        ]
+    )
     _import_structure["models.vit_mae"].extend(
         [
             "TFViTMAEForPreTraining",
@@ -4814,6 +4829,7 @@ else:
     _import_structure["models.vision_encoder_decoder"].append("FlaxVisionEncoderDecoderModel")
     _import_structure["models.vision_text_dual_encoder"].extend(["FlaxVisionTextDualEncoderModel"])
     _import_structure["models.vit"].extend(["FlaxViTForImageClassification", "FlaxViTModel", "FlaxViTPreTrainedModel"])
+    _import_structure["models.dinov2"].extend(["FlaxDinov2ForImageClassification", "FlaxDinov2Model", "FlaxDinov2PreTrainedModel"])
     _import_structure["models.wav2vec2"].extend(
         [
             "FlaxWav2Vec2ForCTC",
@@ -5669,6 +5685,7 @@ if TYPE_CHECKING:
         VisualBertConfig,
     )
     from .models.vit import ViTConfig
+    from .models.dinov2 import Dinov2Config
     from .models.vit_mae import ViTMAEConfig
     from .models.vit_msn import ViTMSNConfig
     from .models.vitdet import VitDetConfig
@@ -7964,6 +7981,11 @@ if TYPE_CHECKING:
             ViTModel,
             ViTPreTrainedModel,
         )
+        from .models.dinov2 import (
+            Dinov2ForImageClassification,
+            Dinov2Model,
+            Dinov2PreTrainedModel,
+        )
         from .models.vit_mae import (
             ViTMAEForPreTraining,
             ViTMAEModel,
@@ -8653,6 +8675,11 @@ if TYPE_CHECKING:
             TFViTModel,
             TFViTPreTrainedModel,
         )
+        from .models.dinov2 import (
+            TFDinov2ForImageClassification,
+            TFDinov2Model,
+            TFDinov2PreTrainedModel,
+        )
         from .models.vit_mae import (
             TFViTMAEForPreTraining,
             TFViTMAEModel,
@@ -9002,6 +9029,11 @@ if TYPE_CHECKING:
             FlaxViTForImageClassification,
             FlaxViTModel,
             FlaxViTPreTrainedModel,
+        )
+        from .models.dinov2 import (
+            FlaxDinov2ForImageClassification,
+            FlaxDinov2Model,
+            FlaxDinov2PreTrainedModel,
         )
         from .models.wav2vec2 import (
             FlaxWav2Vec2ForCTC,

@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2023 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,15 +18,16 @@ import unittest
 
 from transformers import Dinov2Config
 from transformers.testing_utils import (
-    is_flaky,
+    require_accelerate,
     require_torch,
+    require_torch_accelerator,
+    require_torch_fp16,
     require_vision,
     slow,
     torch_device,
 )
 from transformers.utils import cached_property, is_torch_available, is_vision_available
 
-from ...test_backbone_common import BackboneTesterMixin
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 from ...test_pipeline_mixin import PipelineTesterMixin
@@ -36,13 +37,13 @@ if is_torch_available():
     import torch
     from torch import nn
 
-    from transformers import Dinov2Backbone, Dinov2ForImageClassification, Dinov2Model
+    from transformers import Dinov2ForImageClassification, Dinov2ForMaskedImageModeling, Dinov2Model
 
 
 if is_vision_available():
     from PIL import Image
 
-    from transformers import AutoImageProcessor
+    from transformers import ViTImageProcessor
 
 
 class Dinov2ModelTester:
@@ -65,8 +66,9 @@ class Dinov2ModelTester:
         type_sequence_label_size=10,
         initializer_range=0.02,
         scope=None,
-        attn_implementation="eager",
+        encoder_stride=2,
         mask_ratio=0.5,
+        attn_implementation="eager",
     ):
         self.parent = parent
         self.batch_size = batch_size
@@ -85,13 +87,14 @@ class Dinov2ModelTester:
         self.type_sequence_label_size = type_sequence_label_size
         self.initializer_range = initializer_range
         self.scope = scope
+        self.encoder_stride = encoder_stride
         self.attn_implementation = attn_implementation
-        self.mask_ratio = mask_ratio
 
         # in Dinov2, the seq length equals the number of patches + 1 (we add 1 for the [CLS] token)
         num_patches = (image_size // patch_size) ** 2
         self.seq_length = num_patches + 1
-        self.num_masks = int(self.mask_ratio * self.seq_length)
+        self.mask_ratio = mask_ratio
+        self.num_masks = int(mask_ratio * self.seq_length)
         self.mask_length = num_patches
 
     def prepare_config_and_inputs(self):
@@ -119,6 +122,7 @@ class Dinov2ModelTester:
             attention_probs_dropout_prob=self.attention_probs_dropout_prob,
             is_decoder=False,
             initializer_range=self.initializer_range,
+            encoder_stride=self.encoder_stride,
             attn_implementation=self.attn_implementation,
         )
 
@@ -129,52 +133,24 @@ class Dinov2ModelTester:
         result = model(pixel_values)
         self.parent.assertEqual(result.last_hidden_state.shape, (self.batch_size, self.seq_length, self.hidden_size))
 
-    def create_and_check_backbone(self, config, pixel_values, labels):
-        model = Dinov2Backbone(config=config)
+    def create_and_check_for_masked_image_modeling(self, config, pixel_values, labels):
+        model = Dinov2ForMaskedImageModeling(config=config)
         model.to(torch_device)
         model.eval()
         result = model(pixel_values)
-
-        # verify hidden states
-        self.parent.assertEqual(len(result.feature_maps), len(config.out_features))
-        expected_size = self.image_size // config.patch_size
-        self.parent.assertListEqual(
-            list(result.feature_maps[0].shape), [self.batch_size, model.channels[0], expected_size, expected_size]
+        self.parent.assertEqual(
+            result.reconstruction.shape, (self.batch_size, self.num_channels, self.image_size, self.image_size)
         )
 
-        # verify channels
-        self.parent.assertEqual(len(model.channels), len(config.out_features))
-
-        # verify backbone works with out_features=None
-        config.out_features = None
-        model = Dinov2Backbone(config=config)
+        # test greyscale images
+        config.num_channels = 1
+        model = Dinov2ForMaskedImageModeling(config)
         model.to(torch_device)
         model.eval()
+
+        pixel_values = floats_tensor([self.batch_size, 1, self.image_size, self.image_size])
         result = model(pixel_values)
-
-        # verify feature maps
-        self.parent.assertEqual(len(result.feature_maps), 1)
-        self.parent.assertListEqual(
-            list(result.feature_maps[0].shape), [self.batch_size, model.channels[0], expected_size, expected_size]
-        )
-
-        # verify channels
-        self.parent.assertEqual(len(model.channels), 1)
-
-        # verify backbone works with apply_layernorm=False and reshape_hidden_states=False
-        config.apply_layernorm = False
-        config.reshape_hidden_states = False
-
-        model = Dinov2Backbone(config=config)
-        model.to(torch_device)
-        model.eval()
-        result = model(pixel_values)
-
-        # verify feature maps
-        self.parent.assertEqual(len(result.feature_maps), 1)
-        self.parent.assertListEqual(
-            list(result.feature_maps[0].shape), [self.batch_size, self.seq_length, self.hidden_size]
-        )
+        self.parent.assertEqual(result.reconstruction.shape, (self.batch_size, 1, self.image_size, self.image_size))
 
     def create_and_check_for_image_classification(self, config, pixel_values, labels):
         config.num_labels = self.type_sequence_label_size
@@ -216,17 +192,12 @@ class Dinov2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         (
             Dinov2Model,
             Dinov2ForImageClassification,
-            Dinov2Backbone,
+            Dinov2ForMaskedImageModeling,
         )
         if is_torch_available()
         else ()
     )
-    pipeline_model_mapping = (
-        {"image-feature-extraction": Dinov2Model, "image-classification": Dinov2ForImageClassification}
-        if is_torch_available()
-        else {}
-    )
-    fx_compatible = True
+    fx_compatible = False
 
     test_pruning = False
     test_resize_embeddings = False
@@ -236,33 +207,18 @@ class Dinov2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         self.model_tester = Dinov2ModelTester(self)
         self.config_tester = ConfigTester(self, config_class=Dinov2Config, has_text_modality=False, hidden_size=37)
 
-    @is_flaky(max_attempts=3, description="`torch.nn.init.trunc_normal_` is flaky.")
-    def test_initialization(self):
-        super().test_initialization()
+    @unittest.skip(
+        "Since `torch==2.3+cu121`, although this test passes, many subsequent tests have `CUDA error: misaligned address`."
+        "If `nvidia-xxx-cu118` are also installed, no failure (even with `torch==2.3+cu121`)."
+    )
+    def test_multi_gpu_data_parallel_forward(self):
+        super().test_multi_gpu_data_parallel_forward()
 
     def test_config(self):
         self.config_tester.run_common_tests()
 
     @unittest.skip(reason="Dinov2 does not use inputs_embeds")
     def test_inputs_embeds(self):
-        pass
-
-    @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
-    )
-    def test_training_gradient_checkpointing(self):
-        pass
-
-    @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
-    )
-    def test_training_gradient_checkpointing_use_reentrant(self):
-        pass
-
-    @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
-    )
-    def test_training_gradient_checkpointing_use_reentrant_false(self):
         pass
 
     def test_model_get_set_embeddings(self):
@@ -278,21 +234,17 @@ class Dinov2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_model(*config_and_inputs)
 
-    def test_backbone(self):
+    def test_for_masked_image_modeling(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
-        self.model_tester.create_and_check_backbone(*config_and_inputs)
+        self.model_tester.create_and_check_for_masked_image_modeling(*config_and_inputs)
 
     def test_for_image_classification(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_for_image_classification(*config_and_inputs)
 
-    @unittest.skip(reason="Dinov2 does not support feedforward chunking yet")
-    def test_feed_forward_chunking(self):
-        pass
-
     @slow
     def test_model_from_pretrained(self):
-        model_name = "facebook/dinov2-base"
+        model_name = "google/dinov2-base-patch16-224"
         model = Dinov2Model.from_pretrained(model_name)
         self.assertIsNotNone(model)
 
@@ -308,37 +260,70 @@ def prepare_img():
 class Dinov2ModelIntegrationTest(unittest.TestCase):
     @cached_property
     def default_image_processor(self):
-        return AutoImageProcessor.from_pretrained("facebook/dinov2-base") if is_vision_available() else None
+        return ViTImageProcessor.from_pretrained("google/dinov2-base-patch16-224") if is_vision_available() else None
 
     @slow
-    def test_inference_no_head(self):
-        model = Dinov2Model.from_pretrained("facebook/dinov2-base").to(torch_device)
+    def test_inference_image_classification_head(self):
+        model = Dinov2ForImageClassification.from_pretrained("google/dinov2-base-patch16-224").to(torch_device)
 
         image_processor = self.default_image_processor
         image = prepare_img()
-        inputs = image_processor(image, return_tensors="pt").to(torch_device)
+        inputs = image_processor(images=image, return_tensors="pt").to(torch_device)
 
         # forward pass
         with torch.no_grad():
             outputs = model(**inputs)
 
-        # verify the last hidden states
-        expected_shape = torch.Size((1, 257, 768))
+        # verify the logits
+        expected_shape = torch.Size((1, 1000))
+        self.assertEqual(outputs.logits.shape, expected_shape)
+
+        expected_slice = torch.tensor([-0.2744, 0.8215, -0.0836]).to(torch_device)
+
+        self.assertTrue(torch.allclose(outputs.logits[0, :3], expected_slice, atol=1e-4))
+
+    @slow
+    def test_inference_interpolate_pos_encoding(self):
+        # Dinov2 models have an `interpolate_pos_encoding` argument in their forward method,
+        # allowing to interpolate the pre-trained position embeddings in order to use
+        # the model on higher resolutions. The DINO model by Facebook AI leverages this
+        # to visualize self-attention on higher resolution images.
+        model = Dinov2Model.from_pretrained("facebook/dino-dinov2s8").to(torch_device)
+
+        image_processor = ViTImageProcessor.from_pretrained("facebook/dino-dinov2s8", size=480)
+        image = prepare_img()
+        inputs = image_processor(images=image, return_tensors="pt")
+        pixel_values = inputs.pixel_values.to(torch_device)
+
+        # forward pass
+        with torch.no_grad():
+            outputs = model(pixel_values, interpolate_pos_encoding=True)
+
+        # verify the logits
+        expected_shape = torch.Size((1, 3601, 384))
         self.assertEqual(outputs.last_hidden_state.shape, expected_shape)
 
         expected_slice = torch.tensor(
-            [[-2.1747, -0.4729, 1.0936], [-3.2780, -0.8269, -0.9210], [-2.9129, 1.1284, -0.7306]],
-            device=torch_device,
-        )
+            [[4.2340, 4.3906, -6.6692], [4.5463, 1.8928, -6.7257], [4.4429, 0.8496, -5.8585]]
+        ).to(torch_device)
+
         self.assertTrue(torch.allclose(outputs.last_hidden_state[0, :3, :3], expected_slice, atol=1e-4))
 
+    @slow
+    @require_accelerate
+    @require_torch_accelerator
+    @require_torch_fp16
+    def test_inference_fp16(self):
+        r"""
+        A small test to make sure that inference work in half precision without any problem.
+        """
+        model = Dinov2Model.from_pretrained("facebook/dino-dinov2s8", torch_dtype=torch.float16, device_map="auto")
+        image_processor = self.default_image_processor
 
-@require_torch
-class Dinov2BackboneTest(unittest.TestCase, BackboneTesterMixin):
-    all_model_classes = (Dinov2Backbone,) if is_torch_available() else ()
-    config_class = Dinov2Config
+        image = prepare_img()
+        inputs = image_processor(images=image, return_tensors="pt")
+        pixel_values = inputs.pixel_values.to(torch_device)
 
-    has_attentions = False
-
-    def setUp(self):
-        self.model_tester = Dinov2ModelTester(self)
+        # forward pass to make sure inference works in fp16
+        with torch.no_grad():
+            _ = model(pixel_values)
